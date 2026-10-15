@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import User, UserRole
 from app.repositories import UserRepository
 from app.security import hash_password, verify_password
-from app.services.exceptions import AlreadyExistsError, NotFoundError
+from app.services.exceptions import AlreadyExistsError, BusinessRuleError, NotFoundError
+from app.services.permissions import require_admin
 
 
 class UserService:
@@ -26,7 +27,7 @@ class UserService:
         return user
 
     async def authenticate(self, email: str, password: str) -> User | None:
-        """Проверка логина и пароля. В ЛР2 при успехе будет выдаваться JWT."""
+        # Проверка логина и пароля
         user = await self.users.get_by_email(email.strip().lower())
         if user is None or not verify_password(password, user.hashed_password):
             return None
@@ -46,7 +47,15 @@ class UserService:
         await self.session.commit()
         return user
 
+    async def change_role(self, user_id: int, role: UserRole, actor: User) -> User:
+        # Назначить роль может только администратор
+        require_admin(actor)
+        if user_id == actor.id:
+            raise BusinessRuleError("Нельзя изменить собственную роль")
+        user = await self.users.update(await self.get(user_id), role=role)
+        await self.session.commit()
+        return user
+
     async def delete(self, user_id: int) -> None:
-        """Удаление пользователя. Его брони удалит сама БД (ON DELETE CASCADE)."""
         await self.users.delete(await self.get(user_id))
         await self.session.commit()

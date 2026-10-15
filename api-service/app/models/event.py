@@ -21,10 +21,9 @@ if TYPE_CHECKING:
     from app.models.booking import Booking
     from app.models.category import Category
     from app.models.location import Location
+    from app.models.user import User
 
-# Связующая таблица M:N «мероприятие — категория». Собственных атрибутов у связи нет,
-# поэтому это просто Table, а не модель. Составной первичный ключ (event_id, category_id)
-# не даёт привязать одну категорию к мероприятию дважды.
+# M:N мероприятие — категория; составной PK не даёт привязать категорию дважды
 event_categories = Table(
     "event_categories",
     Base.metadata,
@@ -50,18 +49,19 @@ class Event(CreatedAtMixin, Base):
         default=EventStatus.SCHEDULED,
         server_default=EventStatus.SCHEDULED.value,
     )
+    # При удалении организатора мероприятие остаётся (SET NULL)
+    organizer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
 
     location: Mapped["Location"] = relationship(back_populates="events")
-    # Категории всегда отсортированы по названию.
-    # passive_deletes=True: строки event_categories при удалении мероприятия
-    # удаляет сама БД (ON DELETE CASCADE).
+    organizer: Mapped["User | None"] = relationship()
+    # Связи event_categories удаляет БД (CASCADE)
     categories: Mapped[list["Category"]] = relationship(
         secondary=event_categories,
         back_populates="events",
         order_by="Category.name",
         passive_deletes=True,
     )
-    # passive_deletes="all": SQLAlchemy не трогает брони при удалении мероприятия
-    # (иначе он попытался бы обнулить bookings.event_id). Решение принимает БД:
-    # FK ... ON DELETE RESTRICT запретит удаление, если брони есть.
+    # Брони не трогаем: удаление мероприятия с бронями запретит БД (RESTRICT)
     bookings: Mapped[list["Booking"]] = relationship(back_populates="event", passive_deletes="all")

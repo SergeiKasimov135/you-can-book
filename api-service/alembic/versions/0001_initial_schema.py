@@ -1,13 +1,4 @@
-"""initial schema: users, locations, categories, events, event_categories, bookings
-
-Revision ID: 0001
-Revises:
-Create Date: 2026-10-15 15:47:33
-
-Сгенерирована командой `alembic revision --autogenerate` и проверена вручную:
-autogenerate дублировал CHECK-ограничения для enum-колонок, дубли удалены,
-статусы и роли описаны как VARCHAR(20) + именованный CHECK.
-"""
+"""initial schema: users, locations, categories, events, event_categories, bookings"""
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -131,7 +122,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Удаляем в обратном порядке: сначала таблицы, которые ссылаются на другие
+    # Сначала таблицы, которые ссылаются на другие
     op.drop_table("bookings")
     op.drop_table("event_categories")
     op.drop_table("events")

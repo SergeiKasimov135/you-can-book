@@ -21,8 +21,7 @@ class User(CreatedAtMixin, Base):
         varchar_enum(UserRole, "role"), default=UserRole.CLIENT, server_default=UserRole.CLIENT.value
     )
 
-    # Брони пользователя. passive_deletes=True: удаление броней при удалении
-    # пользователя выполняет сама БД (ON DELETE CASCADE), а не SQLAlchemy.
+    # Брони при удалении пользователя удаляет БД (CASCADE)
     bookings: Mapped[list["Booking"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )

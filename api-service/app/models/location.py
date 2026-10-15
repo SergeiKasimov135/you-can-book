@@ -18,5 +18,5 @@ class Location(Base):
     address: Mapped[str] = mapped_column(String(255))
     capacity: Mapped[int | None] = mapped_column(Integer)  # справочно, не контролируется
 
-    # Удаление площадки с мероприятиями запрещает БД (FK ... ON DELETE RESTRICT)
+    # Площадку с мероприятиями удалить нельзя (RESTRICT)
     events: Mapped[list["Event"]] = relationship(back_populates="location", passive_deletes="all")

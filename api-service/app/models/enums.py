@@ -1,8 +1,3 @@
-"""Перечисления статусов и ролей.
-
-В БД они хранятся как VARCHAR + CHECK-ограничение (а не как ENUM-тип PostgreSQL):
-так проще добавлять новые значения миграциями.
-"""
 from enum import Enum
 
 from sqlalchemy import Enum as SAEnum
@@ -10,7 +5,8 @@ from sqlalchemy import Enum as SAEnum
 
 class UserRole(str, Enum):
     CLIENT = "CLIENT"
-    ADMIN = "ADMIN"
+    ORGANIZER = "ORGANIZER"  # ведёт свои мероприятия
+    ADMIN = "ADMIN"  # управляет всем каталогом
 
 
 class EventStatus(str, Enum):
@@ -24,8 +20,39 @@ class BookingStatus(str, Enum):
     ATTENDED = "ATTENDED"
 
 
+class FriendshipStatus(str, Enum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+
+
+class InvitationStatus(str, Enum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    DECLINED = "DECLINED"
+
+
+class FeedbackCriterion(str, Enum):
+    # Критерии отзыва
+
+    AUDIENCE = "AUDIENCE"
+    CULTURE = "CULTURE"
+    ORGANIZATION = "ORGANIZATION"
+    VENUE = "VENUE"
+    PROGRAM = "PROGRAM"
+
+
+# Код -> (название, вопрос пользователю)
+CRITERION_QUESTIONS: dict[FeedbackCriterion, tuple[str, str]] = {
+    FeedbackCriterion.AUDIENCE: ("Аудитория", "Публика и атмосфера в зале были приятными?"),
+    FeedbackCriterion.CULTURE: ("Культурность", "Мероприятие было содержательным и культурным?"),
+    FeedbackCriterion.ORGANIZATION: ("Организация", "Вход, начало вовремя и работа персонала — без проблем?"),
+    FeedbackCriterion.VENUE: ("Площадка", "На площадке удобно: звук, видимость, чистота?"),
+    FeedbackCriterion.PROGRAM: ("Программа", "Программа соответствовала анонсу?"),
+}
+
+
 def varchar_enum(enum_cls: type[Enum], name: str) -> SAEnum:
-    """Тип колонки: VARCHAR(20) с CHECK (value IN (...))."""
+    # Тип колонки: VARCHAR(20) с CHECK (value IN (...))
     return SAEnum(
         enum_cls,
         name=name,

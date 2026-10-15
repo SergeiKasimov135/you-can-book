@@ -1,11 +1,9 @@
-"""Базовый класс моделей и общие настройки метаданных."""
 from datetime import datetime
 
 from sqlalchemy import DateTime, MetaData, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-# Единые правила именования ограничений. Без них PostgreSQL придумает имена сам,
-# и Alembic не сможет надёжно удалить или изменить ограничение в следующих миграциях.
+# Имена ограничений нужны Alembic, чтобы менять их в миграциях
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_name)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
@@ -24,7 +22,7 @@ class Base(DeclarativeBase):
 
 
 class CreatedAtMixin:
-    """Поле created_at, значение по умолчанию ставит сама БД (DEFAULT now())."""
+    # created_at, DEFAULT now() на стороне БД
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

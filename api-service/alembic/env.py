@@ -1,4 +1,3 @@
-"""Окружение Alembic с асинхронным движком (asyncpg)."""
 import asyncio
 from logging.config import fileConfig
 
@@ -20,7 +19,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    """Режим --sql: печатает SQL миграции, не подключаясь к БД."""
+    # Режим --sql: печатает SQL миграции, не подключаясь к БД
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,

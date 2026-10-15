@@ -1,17 +1,21 @@
-"""Заполнение БД тестовыми данными.
-
-Запуск (из папки api-service):  python -m scripts.seed
-
-Скрипт очищает все таблицы и создаёт данные заново, поэтому его можно
-запускать сколько угодно раз. Даты мероприятий считаются от текущего
-момента, так что «будущие» мероприятия всегда остаются будущими.
-"""
 import asyncio
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from app.db import SessionFactory, engine
-from app.models import BookingStatus, UserRole
+from app.models import (
+    BookingStatus,
+    EventFeedback,
+    EventInvitation,
+    FeedbackCriterion,
+    FeedbackScore,
+    Friendship,
+    FriendshipStatus,
+    UserRole,
+)
 from app.repositories import (
     BookingRepository,
     CategoryRepository,
@@ -22,11 +26,9 @@ from app.repositories import (
 from app.security import hash_password
 from sqlalchemy import text
 
-# Часовой пояс агентства (Самара, UTC+4). Фиксированное смещение вместо zoneinfo,
-# чтобы на Windows не требовался пакет tzdata
+# Самара, UTC+4 (без zoneinfo, чтобы на Windows не нужен был tzdata)
 LOCAL_TZ = timezone(timedelta(hours=4))
 
-# Пароль всех тестовых пользователей
 DEFAULT_PASSWORD = "password123"
 
 USERS = [
@@ -35,7 +37,13 @@ USERS = [
     ("ivan@ycb.ru", "Иван Петров", UserRole.CLIENT),
     ("olga@ycb.ru", "Ольга Смирнова", UserRole.CLIENT),
     ("pavel@ycb.ru", "Павел Кузнецов", UserRole.CLIENT),
+    # организаторы
+    ("dmitry@ycb.ru", "Дмитрий Орлов (организатор концертов)", UserRole.ORGANIZER),
+    ("anna@ycb.ru", "Анна Белова (организатор лекций)", UserRole.ORGANIZER),
 ]
+
+# индекс площадки -> email организатора
+ORGANIZER_BY_LOCATION = {0: "dmitry@ycb.ru", 1: "anna@ycb.ru", 2: "dmitry@ycb.ru", 3: "dmitry@ycb.ru"}
 
 LOCATIONS = [
     # название, адрес, вместимость
@@ -73,24 +81,77 @@ BOOKINGS = [
     ("olga@ycb.ru", 0, BookingStatus.BOOKED, "Нужно место у прохода"),
     ("pavel@ycb.ru", 5, BookingStatus.BOOKED, None),
     ("pavel@ycb.ru", 9, BookingStatus.CANCELLED, "Не смог прийти"),
+    # посетители прошедших мероприятий (для отзывов)
+    ("olga@ycb.ru", 9, BookingStatus.ATTENDED, None),
+    ("pavel@ycb.ru", 10, BookingStatus.ATTENDED, None),
+]
+
+# (кто отправил заявку, кому, статус)
+FRIENDSHIPS = [
+    ("ivan@ycb.ru", "olga@ycb.ru", FriendshipStatus.ACCEPTED),
+    ("olga@ycb.ru", "pavel@ycb.ru", FriendshipStatus.ACCEPTED),
+    ("pavel@ycb.ru", "ivan@ycb.ru", FriendshipStatus.PENDING),  # Иван ещё не ответил
+]
+
+# (кто, кого, индекс мероприятия, сообщение)
+INVITATIONS = [
+    ("olga@ycb.ru", "ivan@ycb.ru", 2, "Пойдём на лекцию? Я уже записалась"),
+]
+
+C = FeedbackCriterion
+
+# (email, индекс мероприятия, {критерий: хорошо/плохо}, комментарий); неотмеченных критериев нет в словаре
+FEEDBACK = [
+    (
+        "ivan@ycb.ru", 9,
+        {C.AUDIENCE: True, C.CULTURE: True, C.ORGANIZATION: False, C.VENUE: True},
+        "Отличный звук, но на входе была очередь",
+    ),
+    (
+        "olga@ycb.ru", 9,
+        {C.AUDIENCE: True, C.ORGANIZATION: False, C.PROGRAM: True},
+        None,
+    ),
+    (
+        "olga@ycb.ru", 10,
+        {C.CULTURE: True, C.ORGANIZATION: True, C.PROGRAM: True},
+        "Понятно даже без технического образования",
+    ),
 ]
 
 
+async def check_schema() -> None:
+    # Без последней миграции seed упадёт на отсутствующих таблицах
+    ini = Path(__file__).resolve().parents[1] / "alembic.ini"
+    head = ScriptDirectory.from_config(Config(str(ini))).get_current_head()
+    async with engine.connect() as conn:
+        current = None
+        if await conn.scalar(text("SELECT to_regclass('alembic_version')")):
+            current = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+    if current != head:
+        raise SystemExit(
+            f"Схема БД на версии {current or '(пусто)'}, а нужна {head}. "
+            "Сначала выполните: alembic upgrade head"
+        )
+
+
 async def clear_database() -> None:
-    """Удаляет все строки и сбрасывает счётчики id (SERIAL) к 1."""
+    # Очистка таблиц и сброс id
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE bookings, event_categories, events, categories, locations, users "
+                "TRUNCATE feedback_scores, event_feedback, event_invitations, "
+                "friendships, bookings, event_categories, events, categories, locations, users "
                 "RESTART IDENTITY CASCADE"
             )
         )
 
 
 async def seed() -> None:
+    await check_schema()
     await clear_database()
     now = datetime.now(LOCAL_TZ).replace(minute=0, second=0, microsecond=0)
-    hashed = hash_password(DEFAULT_PASSWORD)  # один хеш на всех — bcrypt медленный намеренно
+    hashed = hash_password(DEFAULT_PASSWORD)  # bcrypt медленный — один хеш на всех
 
     async with SessionFactory() as session:
         users_repo = UserRepository(session)
@@ -117,6 +178,7 @@ async def seed() -> None:
                     title=title,
                     event_date=(now + timedelta(days=days)).replace(hour=hour),
                     location_id=locations[loc_idx].id,
+                    organizer_id=users[ORGANIZER_BY_LOCATION[loc_idx]].id,
                     categories=[categories[c] for c in cat_names],
                     price=price,
                 )
@@ -128,11 +190,38 @@ async def seed() -> None:
                 user_id=users[email].id, event_id=events[event_idx].id, status=status, comment=comment
             )
 
+        for requester, addressee, status in FRIENDSHIPS:
+            session.add(
+                Friendship(requester_id=users[requester].id, addressee_id=users[addressee].id, status=status)
+            )
+
+        for inviter, invitee, event_idx, message in INVITATIONS:
+            session.add(
+                EventInvitation(
+                    event_id=events[event_idx].id,
+                    inviter_id=users[inviter].id,
+                    invitee_id=users[invitee].id,
+                    message=message,
+                )
+            )
+
+        for email, event_idx, scores, comment in FEEDBACK:
+            session.add(
+                EventFeedback(
+                    event_id=events[event_idx].id,
+                    user_id=users[email].id,
+                    comment=comment,
+                    scores=[FeedbackScore(criterion=c, positive=v) for c, v in scores.items()],
+                )
+            )
+
         await session.commit()
 
     print(
         f"Тестовые данные загружены: пользователей {len(USERS)}, площадок {len(LOCATIONS)}, "
-        f"категорий {len(CATEGORIES)}, мероприятий {len(EVENTS)}, броней {len(BOOKINGS)}."
+        f"категорий {len(CATEGORIES)}, мероприятий {len(EVENTS)}, броней {len(BOOKINGS)}, "
+        f"дружб {len(FRIENDSHIPS)}, приглашений {len(INVITATIONS)}, "
+        f"отзывов {len(FEEDBACK)}."
     )
     print(f"Пароль всех пользователей: {DEFAULT_PASSWORD}")
 
