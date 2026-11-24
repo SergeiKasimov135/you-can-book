@@ -10,4 +10,6 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-CMD ["python", "-m", "scripts.demo"]
+EXPOSE 8000
+# Gunicorn управляет процессами, каждый воркер — uvicorn (ASGI) с приложением FastAPI
+CMD ["gunicorn", "app.main:app", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:8000", "--access-logfile", "-"]

@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import datetime, timezone
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import selectinload
@@ -6,7 +7,9 @@ from sqlalchemy.orm import selectinload
 from app.models import (
     Booking,
     BookingStatus,
+    Event,
     EventInvitation,
+    EventStatus,
     Friendship,
     FriendshipStatus,
     InvitationStatus,
@@ -43,6 +46,23 @@ class FriendshipRepository(BaseRepository[Friendship]):
             select(accepted.c.addressee_id).where(accepted.c.requester_id == user_id)
         )
         stmt = select(User).where(User.id.in_(friend_id)).order_by(User.full_name)
+        return (await self.session.scalars(stmt)).all()
+
+    async def friends_bookings(self, user_id: int) -> Sequence[Booking]:
+        # Активные брони друзей на будущие мероприятия
+        friend_ids = [f.id for f in await self.list_friends(user_id)]
+        stmt = (
+            select(Booking)
+            .join(Event, Event.id == Booking.event_id)
+            .where(
+                Booking.user_id.in_(friend_ids),
+                Booking.status == BookingStatus.BOOKED,
+                Event.status == EventStatus.SCHEDULED,
+                Event.event_date >= datetime.now(timezone.utc),
+            )
+            .options(selectinload(Booking.user), selectinload(Booking.event))
+            .order_by(Event.event_date, Booking.id)
+        )
         return (await self.session.scalars(stmt)).all()
 
     async def list_incoming(self, user_id: int) -> Sequence[Friendship]:

@@ -20,13 +20,19 @@ services:
       timeout: 5s
       retries: 10
 
-  # Код внутри Docker, если localhost не работает (VPN); запуск: docker compose run --rm api ...
+  # API: миграции, затем gunicorn с uvicorn-воркерами (CMD из Dockerfile).
+  # Наружу не публикуется — доступ только через nginx. Скрипты: docker compose run --rm api python -m ...
   api:
     build: ./api-service
-    profiles: ["tools"]
+    container_name: you-can-book-api
+    restart: unless-stopped
+    command: sh -c "alembic upgrade head && exec gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 --access-logfile -"
     environment:
       # postgres:5432 — адрес БД внутри сети compose
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-you_can_book}:${POSTGRES_PASSWORD:-you_can_book}@postgres:5432/${POSTGRES_DB:-you_can_book_db}?ssl=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-at-least-32-bytes-long}
+    expose:
+      - "8000"
     volumes:
       # Код монтируется, пересборка не нужна
       - ./api-service:/app
@@ -35,6 +41,21 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Обратный прокси: статика из nginx/static, /api/ -> api:8000
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: you-can-book-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/static:/usr/share/nginx/html:ro
+    networks:
+      - you-can-book-network
+    depends_on:
+      - api
 
 networks:
   you-can-book-network:

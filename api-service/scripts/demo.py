@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.db import SessionFactory, engine
@@ -11,6 +11,7 @@ from app.models import (
     Category,
     Event,
     EventFeedback,
+    EventStatus,
     EventInvitation,
     CRITERION_QUESTIONS,
     FeedbackCriterion,
@@ -29,7 +30,10 @@ from app.services import (
     ServiceError,
     UserService,
 )
+
+from app.repositories import FriendshipRepository
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 
 from scripts.seed import DEFAULT_PASSWORD, LOCAL_TZ, seed
@@ -616,24 +620,58 @@ async def scenario_summary() -> None:
         table(["Статус", "Количество"], [(s.value, n) for s, n in result])
 
 
+async def friends_bookings(user_id: int):
+    async with SessionFactory() as session:
+        friends = await FriendshipRepository(session).list_friends(user_id)
+        friend_ids = [f.id for f in friends]
+        stmt = (
+            select(Booking)
+            .join(Event, Event.id == Booking.event_id)
+            .where(
+                Booking.user_id.in_(friend_ids),
+                Booking.status == BookingStatus.BOOKED,
+                Event.status == EventStatus.SCHEDULED,
+                Event.event_date >= datetime.now(timezone.utc),
+            )
+            .options(selectinload(Booking.user), selectinload(Booking.event))
+            .order_by(Event.event_date)
+        )
+        return (await session.scalars(stmt)).all()
+
+
+async def scenario_friends_bookings() -> None:
+    header("Кто из друзей идёт на какие мероприятия")
+    async with SessionFactory() as session:
+        users = UserService(session)
+        ivan = await users.get(IVAN)
+
+        step(f"Друзья {ivan.full_name} и их будущие брони")
+        bookings = await friends_bookings(IVAN)
+        for b in bookings:
+            ok(f"{b.event.event_date:%d.%m %H:%M}  {b.event.title}  — {b.user.full_name}")
+        if not bookings:
+            ok("(нет)")
+
+
 async def main(show_sql: bool) -> None:
     engine.echo = show_sql
     try:
         await seed()
-        print(f"(вход для всех тестовых пользователей: пароль {DEFAULT_PASSWORD})")
-        await scenario_connection()
-        maria_id = await scenario_users()
-        await scenario_catalog()
-        await scenario_booking(maria_id)
-        await scenario_cancel_booking(maria_id)
-        quiz_event_id = await scenario_admin_catalog()
-        await scenario_admin_reschedule_and_cancel()
-        await scenario_admin_bookings()
-        await scenario_friends(maria_id)
-        await scenario_feedback()
-        await scenario_deletes(quiz_event_id)
-        await scenario_summary()
-        print("\nВсе сценарии выполнены.")
+        # print(f"(вход для всех тестовых пользователей: пароль {DEFAULT_PASSWORD})")
+        # await scenario_connection()
+        # maria_id = await scenario_users()
+        # await scenario_catalog()
+        # await scenario_booking(maria_id)
+        # await scenario_cancel_booking(maria_id)
+        # quiz_event_id = await scenario_admin_catalog()
+        # await scenario_admin_reschedule_and_cancel()
+        # await scenario_admin_bookings()
+        # await scenario_friends(maria_id)
+        # await scenario_feedback()
+        # await scenario_deletes(quiz_event_id)
+        # await scenario_summary()
+        # print("\nВсе сценарии выполнены.")
+        await scenario_friends_bookings()
     finally:
         await engine.dispose()
 

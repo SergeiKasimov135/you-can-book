@@ -91,6 +91,10 @@ class FriendService:
         # Кто из друзей уже идёт на мероприятие
         return await self.friendships.friends_going(user_id, event_id)
 
+    async def friends_bookings(self, user_id: int) -> Sequence[Booking]:
+        # Куда идут друзья: их активные брони на будущие мероприятия
+        return await self.friendships.friends_bookings(user_id)
+
     # ---------- Приглашения на мероприятия ----------
     async def invite(
         self, actor: User, friend_id: int, event_id: int, message: str | None = None

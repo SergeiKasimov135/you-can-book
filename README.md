@@ -2,7 +2,9 @@
 
 Распределённое приложение агентства досуга: каталог городских мероприятий и бронирование мест (оплата на месте).
 
-Текущее состояние: **ЛР1** — база данных PostgreSQL в Docker, модели SQLAlchemy, CRUD, миграции Alembic, тестовые данные и демонстрационный скрипт.
+Текущее состояние: **ЛР2** — REST API на FastAPI (JWT, DTO на Pydantic, внедрение зависимостей), Gunicorn с uvicorn-воркерами и обратный прокси Nginx. Под ним — **ЛР1**: PostgreSQL в Docker, модели SQLAlchemy, CRUD, миграции Alembic, тестовые данные и демо-скрипт.
+
+Раздел про ЛР2 — [ниже](#лр2-rest-api).
 
 ---
 
@@ -27,6 +29,170 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 - `-SkipDemo` — только миграции и тестовые данные.
 
 Ниже те же шаги описаны вручную — их нужно понимать для защиты.
+
+---
+
+## ЛР2: REST API
+
+### Запуск: вся система в Docker (Nginx + Gunicorn + PostgreSQL)
+
+```powershell
+# из корня проекта
+docker compose up -d --build                       # postgres, api (миграции + gunicorn), nginx
+docker compose run --rm api python -m scripts.seed # тестовые данные (один раз)
+docker compose logs -f api                         # лог запросов
+```
+
+- http://localhost:8080 — статическая страница, её отдаёт сам nginx. Список мероприятий на ней загружается запросом к API.
+- http://localhost:8080/api/docs — Swagger UI (интерактивная документация). Кнопка **Authorize**: email и пароль `password123`.
+- http://localhost:8080/api/redoc — та же документация в формате ReDoc.
+
+Порт 8080 задаётся `NGINX_PORT` в корневом `.env`. Контейнер `api` наружу не открыт: к API можно попасть только через nginx.
+
+### Запуск: API на компьютере (разработка в PyCharm)
+
+Gunicorn на Windows не работает: он использует `fork` и Unix-сигналы. Поэтому локально API запускается напрямую через uvicorn:
+
+```powershell
+cd api-service
+pip install -r requirements.txt
+alembic upgrade head
+python -m scripts.seed
+uvicorn app.main:app --reload --port 8000
+```
+
+Swagger: http://localhost:8000/api/docs. В PyCharm то же самое делает конфигурация **LR2. API (uvicorn --reload)**.
+
+### Как устроено
+
+```
+ клиент (Postman / curl / браузер)
+        │  HTTP :8080
+        ▼
+ nginx                    /        → файлы из nginx/static (статика)
+        │                 /api/... → proxy_pass http://api:8000
+        ▼
+ gunicorn (менеджер процессов, 2 воркера)
+        │  каждый воркер — uvicorn (ASGI-сервер)
+        ▼
+ FastAPI: app/main.py     middleware (лог запросов), обработчик ошибок сервисов
+        │
+ app/api/routers/*.py     эндпоинты: разбор запроса, DTO, статус-коды
+        │  Depends(...)   ← app/api/deps.py: сессия БД → сервис → текущий пользователь (JWT)
+        ▼
+ app/services/            бизнес-правила из ЛР1 (не изменились)
+        ▼
+ app/repositories/ → app/models/ → PostgreSQL
+```
+
+- **DTO и ORM разделены.** `app/schemas/*.py` — Pydantic-модели запросов и ответов, `app/models/*.py` — ORM. В ответ никогда не попадает ORM-объект целиком: `response_model=UserOut` отдаёт только перечисленные поля, без `hashed_password`. Входные схемы проверяют данные до бизнес-логики: email, длину пароля, `capacity > 0`, хотя бы одну категорию, критерий отзыва из enum, строго `true/false` в отметках. Ошибка проверки — `422`.
+- **Внедрение зависимостей** (`app/api/deps.py`). `get_session` открывает сессию на время запроса и закрывает её после ответа (зависимость с `yield`). Сервисы создаются фабриками `get_*_service(session)`, обработчик получает готовый объект через `Annotated[..., Depends(...)]`. Внутри запроса FastAPI кеширует зависимость, поэтому у всех сервисов одна и та же сессия.
+- **Ошибки.** Сервисы бросают свои исключения и про HTTP не знают. `app/main.py` переводит их в коды: `NotFoundError` → 404, `PermissionDeniedError` → 403, `AlreadyExistsError` и `BusinessRuleError` → 409.
+
+### Аутентификация и авторизация (JWT)
+
+1. `POST /api/auth/register` (JSON) создаёт клиента. Пароль хранится bcrypt-хешем.
+2. `POST /api/auth/login` принимает форму `username` (email) и `password` и выдаёт `{"access_token": "...", "token_type": "bearer"}`.
+3. Дальше клиент шлёт заголовок `Authorization: Bearer <token>`.
+
+Токен — JWT с подписью HS256 (секрет `JWT_SECRET`). В нём `sub` (id пользователя), `role` и `exp` (срок, по умолчанию 60 минут). Сервер сессий не хранит: он проверяет подпись и срок, затем читает пользователя из БД. Поэтому удалённый пользователь сразу теряет доступ, а новая роль действует сразу.
+
+Авторизация работает в два уровня:
+- зависимости `AdminUser` и `OrganizerUser` (роль) отвечают `403` ещё до вызова сервиса;
+- сервисы проверяют права на конкретный объект: например, «менять мероприятие может только его организатор».
+
+| Ответ | Когда |
+| --- | --- |
+| 401 | нет токена, подпись неверна, токен просрочен, пользователь удалён |
+| 403 | роль не подходит или чужой объект |
+
+### Эндпоинты
+
+Все адреса начинаются с `/api`. Замок 🔒 — нужен токен; в скобках — нужная роль.
+
+| Метод и путь | Доступ | Что делает |
+| --- | --- | --- |
+| `POST /auth/register` | все | регистрация клиента → 201 |
+| `POST /auth/login` | все | вход, выдача JWT |
+| `GET /auth/me`, `PATCH /auth/me` | 🔒 | свой профиль, смена имени |
+| `GET /users?role=`, `GET /users/{id}` | 🔒 ADMIN | пользователи |
+| `PATCH /users/{id}/role`, `DELETE /users/{id}` | 🔒 ADMIN | назначить роль, удалить |
+| `GET /locations`, `GET /locations/{id}` | все | площадки |
+| `POST`, `PATCH /{id}`, `DELETE /{id}` на `/locations` | 🔒 ADMIN | CRUD площадок |
+| `GET /categories` | все | категории |
+| `POST`, `PATCH /{id}`, `DELETE /{id}` на `/categories` | 🔒 ADMIN | CRUD категорий |
+| `GET /events?category_id=&location_id=&date_from=&date_to=&include_past=&offset=&limit=` | все | каталог с фильтрами и пагинацией |
+| `GET /events/{id}` | все | мероприятие |
+| `GET /events/my` | 🔒 ORGANIZER | мои мероприятия |
+| `POST /events` | 🔒 ORGANIZER | создать (создатель — организатор) |
+| `PATCH /events/{id}` | 🔒 организатор мероприятия | изменить/перенести; в ответе — кого уведомить |
+| `POST /events/{id}/cancel` | 🔒 организатор мероприятия | отменить мероприятие и все брони |
+| `DELETE /events/{id}` | 🔒 организатор мероприятия | удалить (только без броней) |
+| `GET /events/{id}/bookings` | 🔒 организатор мероприятия | список гостей |
+| `GET /events/{id}/friends` | 🔒 | кто из друзей идёт |
+| `GET /events/{id}/feedback`, `GET /events/{id}/rating` | все | отзывы и рейтинг по критериям |
+| `POST /events/{id}/feedback` | 🔒 посетитель | отзыв: `{"marks": {"VENUE": true}, "comment": "..."}` |
+| `POST /bookings`, `GET /bookings` | 🔒 | забронировать, мои брони |
+| `GET /bookings/{id}` | 🔒 владелец / организатор / ADMIN | бронь |
+| `POST /bookings/{id}/cancel` | 🔒 владелец / ADMIN | отменить бронь |
+| `POST /bookings/{id}/attend` | 🔒 организатор мероприятия | отметить приход |
+| `GET /bookings/all?user_id=&event_id=&status=` | 🔒 ADMIN | все брони |
+| `GET /friends`, `DELETE /friends/{user_id}` | 🔒 | друзья, удалить из друзей |
+| `GET /friends/bookings` | 🔒 | куда идут друзья |
+| `GET /friends/requests`, `POST /friends/requests` | 🔒 | входящие заявки, отправить заявку |
+| `POST /friends/requests/{id}/accept`, `.../decline` | 🔒 адресат | ответить на заявку |
+| `POST /invitations`, `GET /invitations?status=` | 🔒 | пригласить друга, мои приглашения |
+| `POST /invitations/{id}/accept`, `.../decline` | 🔒 приглашённый | принятие создаёт бронь |
+| `GET /feedback/criteria` | все | критерии отзыва с вопросами |
+| `DELETE /feedback/{id}` | 🔒 автор / ADMIN | удалить отзыв |
+
+### Демонстрация через Postman
+
+`postman/you-can-book.postman_collection.json` → в Postman **Import**. Запросы разложены по папкам и идут по сценарию сверху вниз: регистрация → каталог → администратор → организатор → клиент → посещение и отзыв → отмена. Запросы «Вход: ...» сами сохраняют токен в переменную `token`, остальные подставляют его в `Authorization`. Адрес меняется в переменной `baseUrl` коллекции: `http://localhost:8080/api` через nginx или `http://localhost:8000/api` для uvicorn. Перед повторным прогоном заново загрузите данные: `python -m scripts.seed`.
+
+### Демонстрация через cURL
+
+**PowerShell.** Там `curl` — это псевдоним другой команды, поэтому вызывается `curl.exe`. JSON-тело удобнее отправлять через `Invoke-RestMethod`: кавычки внутри строки PowerShell передаёт в программы по-разному в версиях 5 и 7.
+
+```powershell
+$api = "http://localhost:8080/api"
+
+curl.exe "$api/events?limit=3"                                           # каталог без токена
+curl.exe -X POST "$api/auth/login" -d "username=ivan@ycb.ru&password=password123"   # вход → JSON с токеном
+
+$token = (Invoke-RestMethod -Method Post "$api/auth/login" -Body @{username="ivan@ycb.ru"; password="password123"}).access_token
+$h = @{ Authorization = "Bearer $token" }
+
+curl.exe -H "Authorization: Bearer $token" "$api/auth/me"                # профиль
+curl.exe -H "Authorization: Bearer $token" "$api/friends/bookings"       # куда идут друзья
+curl.exe -i "$api/auth/me"                                               # без токена → 401
+
+# POST с JSON-телом
+Invoke-RestMethod -Method Post "$api/bookings" -Headers $h -ContentType "application/json" -Body (@{event_id = 2} | ConvertTo-Json)
+Invoke-RestMethod -Method Post "$api/auth/register" -ContentType "application/json" -Body (@{email="me@ycb.ru"; password="password123"} | ConvertTo-Json)
+```
+
+**Git Bash / Linux:**
+
+```bash
+API=http://localhost:8080/api
+TOKEN=$(curl -s -X POST $API/auth/login -d "username=ivan@ycb.ru&password=password123" | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+curl -X POST $API/bookings -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"event_id": 2}'
+curl -X POST $API/auth/register -H "Content-Type: application/json" -d '{"email": "me@ycb.ru", "password": "password123"}'
+```
+
+### Файлы ЛР2
+
+```
+nginx/nginx.conf                 # reverse proxy: статика + /api/ → api:8000
+nginx/static/index.html          # статическая страница
+postman/...postman_collection.json
+api-service/app/main.py          # приложение FastAPI, middleware, обработчик ошибок
+api-service/app/api/deps.py      # зависимости: сессия, сервисы, текущий пользователь, роли
+api-service/app/api/routers/     # auth, users, locations, categories, events, bookings, friends, invitations, feedback
+api-service/app/schemas/         # DTO (Pydantic)
+api-service/app/security.py      # bcrypt + выпуск и проверка JWT
+```
 
 ---
 
@@ -84,9 +250,11 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 you-can-book/
 ├── setup.ps1                   # подготовка и запуск одной командой
-├── docker-compose.yml          # контейнер PostgreSQL (+ сервис api для запуска кода в Docker)
-├── .env.example                # параметры контейнера (логин, пароль, порт)
-└── api-service/                # Python-сервис (в ЛР2 здесь появится FastAPI)
+├── docker-compose.yml          # postgres, api (gunicorn), nginx
+├── .env.example                # параметры контейнеров (логин, пароль, порты, JWT_SECRET)
+├── nginx/                      # конфиг обратного прокси и статика (ЛР2)
+├── postman/                    # коллекция запросов для демонстрации (ЛР2)
+└── api-service/                # Python-сервис: FastAPI + слой работы с БД
     ├── requirements.txt
     ├── Dockerfile              # образ для запуска кода внутри Docker
     ├── .env.example            # строка подключения DATABASE_URL
@@ -101,7 +269,10 @@ you-can-book/
     ├── app/
     │   ├── config.py           # настройки из .env
     │   ├── db.py               # engine и фабрика сессий
-    │   ├── security.py         # хеширование паролей (bcrypt)
+    │   ├── main.py             # приложение FastAPI (ЛР2)
+    │   ├── security.py         # bcrypt и JWT
+    │   ├── api/                # deps.py (зависимости) и routers/ (эндпоинты) — ЛР2
+    │   ├── schemas/            # DTO на Pydantic — ЛР2
     │   ├── models/             # ORM-модели: User, Location, Category, Event, Booking,
     │   │                       #   Friendship, EventInvitation, EventFeedback, FeedbackScore
     │   ├── repositories/       # CRUD-операции (слой доступа к данным)
@@ -114,7 +285,7 @@ you-can-book/
 Слои приложения:
 
 ```
- scripts/demo.py  (в ЛР2 — эндпоинты FastAPI)
+ api/routers/ (ЛР2) и scripts/demo.py (ЛР1)
         │  вызывает
         ▼
  services/        бизнес-правила: «нельзя забронировать отменённое мероприятие»,
