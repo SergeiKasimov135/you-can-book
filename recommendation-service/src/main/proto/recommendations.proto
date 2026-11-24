@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package recommendations.v1;
+
+import "google/protobuf/timestamp.proto";
+import "buf/validate/validate.proto";
+
+option java_package = "ru.signflow.recommendationservice.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "RecommendationsProto";
+
+message CategoryVisitStat {
+  int64 category_id = 1 [(buf.validate.field).int64.gt = 0];
+  int32 visit_count = 2 [(buf.validate.field).int32.gte = 0];
+}
+
+message EventCandidate {
+  int64 event_id = 1 [(buf.validate.field).int64.gt = 0];
+  repeated int64 category_ids = 2 [(buf.validate.field).repeated.items.int64.gt = 0];
+  google.protobuf.Timestamp starts_at = 3 [(buf.validate.field).required = true];
+}
+
+message GetRecommendationsRequest {
+  repeated CategoryVisitStat category_stats = 1 [
+    (buf.validate.field).cel = {
+      id: "category_stats.unique_category_id"
+      message: "category_stats must contain unique category_id values"
+      expression: "this.map(stat, stat.category_id).unique()"
+    }
+  ];
+  repeated EventCandidate candidates = 2 [
+    (buf.validate.field).cel = {
+      id: "candidates.unique_event_id"
+      message: "candidate must contain unique event_id values"
+      expression: "this.map(candidate, candidate.event_id).unique()"
+    }
+  ];
+  int32 limit = 3 [(buf.validate.field).int32.gt = 0];
+}
+
+message Recommendation {
+  int64 event_id = 1 [(buf.validate.field).int64.gt = 0];
+  int64 score = 2 [(buf.validate.field).int64.gte = 0];
+}
+
+message GetRecommendationsResponse {
+  repeated Recommendation recommendations = 1;
+}
+
+service RecommendationService {
+  rpc GetRecommendations(GetRecommendationsRequest)
+      returns (GetRecommendationsResponse);
+}
