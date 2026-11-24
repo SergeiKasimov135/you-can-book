@@ -42,6 +42,15 @@ services:
       postgres:
         condition: service_healthy
 
+  # Java gRPC-сервис рекомендаций: внутри Compose доступен как recommendation:50051.
+  recommendation:
+    build: ./recommendation-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RECOMMENDATION_PORT:-50051}:50051"
+    networks:
+      - you-can-book-network
+
   # Обратный прокси: статика из nginx/static, /api/ -> api:8000
   nginx:
     image: nginx:1.27-alpine
